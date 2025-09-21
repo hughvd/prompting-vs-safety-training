@@ -1,0 +1,7 @@
+Project directories:
+- scripts/: bash entrypoints (organized by purpose)
+- src/: python modules for experiment logic
+- configs/: yaml configuration files
+- data/: run outputs and datasets (gitignored)
+- scratch/: temporary work area (gitignored except .gitkeep)
+- docs/: documentation, logs, and notes

@@ -1,0 +1,15 @@
+[project]
+name = "spec-compliance-eval"
+version = "0.1.0"
+description = "Evaluation pipeline for measuring spec adherence in instruction-tuned models"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27.0",
+  "pyyaml>=6.0.1",
+  "openai>=1.40.0",
+  "tqdm>=4.66.0",
+  "pandas>=2.3.2",
+  "ipykernel>=6.30.1",
+  "seaborn>=0.13.2",
+  "matplotlib>=3.10.6",
+]
