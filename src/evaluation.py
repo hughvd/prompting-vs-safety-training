@@ -12,6 +12,11 @@ except ImportError:  # pragma: no cover
     OpenAI = None  # type: ignore
 
 try:
+    from huggingface_hub import InferenceClient
+except ImportError:  # pragma: no cover
+    InferenceClient = None  # type: ignore
+
+try:
     from tqdm.auto import tqdm
 except ImportError:  # pragma: no cover
     tqdm = None  # type: ignore
@@ -34,11 +39,12 @@ class SpecEvaluator:
 
         self.run_config = config.get("run", {})
         self.http_config = config.get("http", {})
-        self.task_model = self._prepare_model_config(config["task_model"], "task")
-        self.judge_model = self._prepare_model_config(config["judge_model"], "judge")
+        self.request_timeout = float(self.http_config.get("timeout", 60.0))
         self.generation = config.get("generation", {})
         self.judging = config.get("judging", {})
-        self.request_timeout = float(self.http_config.get("timeout", 60.0))
+
+        self.task_model = self._prepare_model_config(config["task_model"], "task")
+        self.judge_model = self._prepare_model_config(config["judge_model"], "judge")
         self.show_progress = bool(self.run_config.get("show_progress", True))
         if self.show_progress and tqdm is None:
             self.logger.warning("tqdm is not installed; progress bar disabled.")
@@ -177,20 +183,41 @@ class SpecEvaluator:
                 "Model client is not initialized. Ensure API keys are configured and dry_run is disabled only when ready."
             )
 
-        response = client.chat.completions.create(
-            model=payload["model"],
-            messages=payload["messages"],
-            temperature=payload.get("temperature"),
-            max_tokens=payload.get("max_tokens"),
-            extra_headers=model_cfg.get("headers"),
-            extra_body=model_cfg.get("extra_body", {}),
-            timeout=self.request_timeout,
-        )
+        provider = model_cfg.get("provider", "openai")
+
+        call_kwargs = {
+            "messages": payload["messages"],
+        }
+        if payload.get("model") is not None:
+            call_kwargs["model"] = payload["model"]
+        if payload.get("temperature") is not None:
+            call_kwargs["temperature"] = payload.get("temperature")
+        if payload.get("max_tokens") is not None:
+            call_kwargs["max_tokens"] = payload.get("max_tokens")
+
+        extra_body = model_cfg.get("extra_body", {})
+        if extra_body:
+            call_kwargs["extra_body"] = extra_body
+
+        if provider == "openai":
+            headers = model_cfg.get("headers")
+            if headers:
+                call_kwargs["extra_headers"] = headers
+            call_kwargs["timeout"] = self.request_timeout
+        elif provider == "huggingface":
+            # timeouts are controlled when instantiating InferenceClient
+            pass
+        else:
+            raise ValueError(f"Unsupported provider '{provider}'")
+
+        response = client.chat.completions.create(**call_kwargs)
 
         try:
             content = response.choices[0].message.content
         except (AttributeError, IndexError, KeyError) as exc:
-            raise ValueError(f"Unexpected response format from OpenRouter: {response}") from exc
+            raise ValueError(
+                f"Unexpected response format from provider '{provider}': {response}"
+            ) from exc
 
         if isinstance(content, list):
             content = "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content)
@@ -200,6 +227,7 @@ class SpecEvaluator:
         result = dict(model_cfg)
         headers = dict(model_cfg.get("headers", {}))
         extra_body = dict(model_cfg.get("extra_body", {}))
+        provider = str(model_cfg.get("provider", "openai")).lower()
 
         api_key = model_cfg.get("api_key")
         api_key_env = model_cfg.get("api_key_env")
@@ -208,19 +236,42 @@ class SpecEvaluator:
 
         client = None
         dry_run = self.run_config.get("dry_run", False)
-        if api_key and not dry_run:
-            if OpenAI is None:
-                raise RuntimeError(
-                    "The 'openai' package is required. Run 'uv sync' to install project dependencies."
-                )
-            client = OpenAI(base_url=model_cfg["base_url"], api_key=api_key)
-        elif not api_key and not dry_run:
-            raise RuntimeError(
-                f"API key required for {label} model '{model_cfg.get('name', 'unknown')}'. Set {api_key_env or 'api_key'} before running."
-            )
 
+        if not dry_run:
+            if provider == "openai":
+                if not api_key:
+                    raise RuntimeError(
+                        f"API key required for {label} model '{model_cfg.get('name', 'unknown')}'. Set {api_key_env or 'api_key'} before running."
+                    )
+                if OpenAI is None:
+                    raise RuntimeError(
+                        "The 'openai' package is required. Run 'uv sync' to install project dependencies."
+                    )
+                client = OpenAI(base_url=model_cfg["base_url"], api_key=api_key)
+            elif provider == "huggingface":
+                if not api_key:
+                    raise RuntimeError(
+                        f"Hugging Face token required for {label} model '{model_cfg.get('name', 'unknown')}'. Set {api_key_env or 'api_key'} before running."
+                    )
+                if InferenceClient is None:
+                    raise RuntimeError(
+                        "The 'huggingface_hub' package is required. Run 'uv sync' to install project dependencies."
+                    )
+                client_kwargs = dict(model_cfg.get("client_kwargs", {}))
+                client = InferenceClient(
+                    model=model_cfg.get("name"),
+                    token=api_key,
+                    timeout=self.request_timeout,
+                    base_url=model_cfg.get("base_url"),
+                    headers=headers or None,
+                    **client_kwargs,
+                )
+            else:
+                raise ValueError(f"Unsupported provider '{provider}' for {label} model")
+
+        result["provider"] = provider
         result["headers"] = headers or None
-        result["extra_body"] = extra_body
+        result["extra_body"] = extra_body or {}
         result["client"] = client
         return result
 
