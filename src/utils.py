@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator
+from typing import Any, Dict, Iterable, Iterator, Optional, Union
 
 import yaml
 
@@ -15,19 +15,24 @@ def load_yaml_config(path: str | Path) -> Dict[str, Any]:
         return yaml.safe_load(handle)
 
 
-def ensure_output_dirs(output_dir: str | Path) -> Dict[str, Path]:
-    """Ensure the standard output directory structure exists."""
+def ensure_output_dirs(
+    output_dir: str | Path,
+    *,
+    create_standard_layout: bool = True,
+) -> Dict[str, Path]:
+    """Ensure output directory exists and optionally create standard subfolders."""
+
     base = Path(output_dir)
     base.mkdir(parents=True, exist_ok=True)
 
-    subdirs = {
-        "base": base,
-        "results": base / "results",
-        "figures": base / "figures",
-        "logs": base / "logs",
-    }
-    for path in subdirs.values():
-        path.mkdir(parents=True, exist_ok=True)
+    subdirs = {"base": base}
+
+    if create_standard_layout:
+        for name in ("results", "figures", "logs"):
+            path = base / name
+            path.mkdir(parents=True, exist_ok=True)
+            subdirs[name] = path
+
     return subdirs
 
 
@@ -64,6 +69,40 @@ def append_jsonl(records: Iterable[Dict[str, Any]], destination: Path) -> None:
         for record in records:
             handle.write(json.dumps(record, ensure_ascii=False))
             handle.write("\n")
+
+
+def resolve_output_path(
+    output_cfg: Union[str, Path, Dict[str, Any]],
+    *,
+    default_subdir: Optional[str] = None,
+) -> Path:
+    """Resolve an output directory from either a path or a config mapping."""
+
+    if isinstance(output_cfg, (str, Path)):
+        return Path(output_cfg)
+
+    if isinstance(output_cfg, dict):
+        root = output_cfg.get("root")
+        if not root:
+            raise ValueError("output.root must be specified when using mapping form")
+
+        path = Path(root)
+
+        experiment = output_cfg.get("experiment")
+        if experiment:
+            path /= experiment
+
+        if "subdir" in output_cfg:
+            subdir = output_cfg.get("subdir")
+        else:
+            subdir = default_subdir
+
+        if subdir:
+            path /= subdir
+
+        return path
+
+    raise TypeError("output configuration must be a path-like or a mapping")
 
 
 def load_env_file(path: str | Path = ".env", override: bool = False) -> Dict[str, str]:

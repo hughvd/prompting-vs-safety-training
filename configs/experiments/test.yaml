@@ -1,0 +1,31 @@
+output:
+  root: "data/experiments"
+  experiment: "baseline"
+model:
+  provider: "openai"
+  base_url: "https://openrouter.ai/api/v1"
+  name: "deepseek/deepseek-r1-0528-qwen3-8b"
+  api_key_env: "OPENROUTER_API_KEY"
+generation:
+  max_tokens: 2048
+  temperature: 0.0
+http:
+  timeout: 60.0
+run:
+  dry_run: false
+specs:
+  directory: "specs"
+  files:
+    - id: "baseline"
+      filename: "baseline.txt"
+    - id: "S0_minimal"
+      filename: "S0_minimal.txt"
+evaluations:
+  refusal:
+    enabled: true
+    config: "configs/evaluation/refusal.yaml"
+    output_subdir: "refusal"
+  capability:
+    enabled: true
+    config: "configs/evaluation/capability.yaml"
+    output_subdir: "capability"

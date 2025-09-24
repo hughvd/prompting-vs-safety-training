@@ -1,0 +1,22 @@
+datasets:
+  or_bench_eval:
+    hf_dataset: "bench-llms/or-bench"
+    hf_config: "or-bench-80k"
+    split: "train"
+    limit: 100
+    shuffle: true
+    seed: 42
+  or_bench_hard:
+    hf_dataset: "bench-llms/or-bench"
+    hf_config: "or-bench-hard-1k"
+    split: "train"
+    limit: 20
+    shuffle: true
+    seed: 42
+  or_bench_toxic:
+    hf_dataset: "bench-llms/or-bench"
+    hf_config: "or-bench-toxic"
+    split: "train"
+    limit: 150
+    shuffle: true
+    seed: 42

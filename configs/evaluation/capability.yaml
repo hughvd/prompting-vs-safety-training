@@ -1,0 +1,6 @@
+dataset:
+  hf_dataset: "TIGER-Lab/MMLU-Pro"
+  split: "validation"
+  limit: 50
+  shuffle: true
+  seed: 42
