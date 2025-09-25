@@ -1,138 +1,100 @@
 from __future__ import annotations
 
-import json
-import logging
-from pathlib import Path
-from typing import Any, Dict
 import re
-
-from datasets import load_dataset
+from typing import Any, Dict, Iterable, List
 
 from ..model_client import ChatModelClient
-from ..utils import ensure_output_dirs
 
-try:
-    from tqdm.auto import tqdm
-except ImportError:  # pragma: no cover
-    tqdm = None  # type: ignore
+THINK_PATTERN = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
-LOGGER = logging.getLogger(__name__)
+## SHITTY FIX
+is_reasoning = True
 
-def run_refusal_evaluation(
+def _clean_answer_text(
+    answer_text: str,
+    reasoning_segment: str | None = None,
     *,
+    expects_reasoning: bool = False,
+) -> str:
+    
+    # Shitty fix for non reasoning models
+    if not is_reasoning:
+        return answer_text.strip()
+
+    text = answer_text or ""
+    if reasoning_segment and text.startswith(reasoning_segment):
+        text = text[len(reasoning_segment) :]
+    elif expects_reasoning:
+        closing = re.search(r"</think>", text, re.IGNORECASE)
+        if closing:
+            text = text[closing.end() :]
+        elif re.search(r"<think", text, re.IGNORECASE):
+            return ""
+        else:
+            return text.strip()
+    else:
+        return text.strip()
+    text = THINK_PATTERN.sub("", text)
+    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def evaluate_refusal_chunk(
     spec_id: str,
     spec_text: str,
-    datasets_cfg: Dict[str, Any],
-    model: ChatModelClient,
+    dataset_name: str,
+    samples: Iterable[Dict[str, Any]],
+    model_cfg: Dict[str, Any],
     generation_cfg: Dict[str, Any],
-    output_base: Path,
-    show_progress: bool = True,
-) -> Dict[str, Any]:
-    """Run refusal benchmarks for a single spec and return summary statistics."""
-
-    ensure_output_dirs(output_base, create_standard_layout=False)
+    *,
+    request_timeout: float,
+    dry_run: bool,
+    reasoning: bool,
+) -> List[Dict[str, Any]]:
+    client = ChatModelClient(model_cfg, request_timeout=request_timeout, dry_run=dry_run)
 
     temperature = generation_cfg.get("temperature")
     max_tokens = generation_cfg.get("max_tokens")
 
-    summaries = []
+    results: List[Dict[str, Any]] = []
+    for sample in samples:
+        prompt = sample.get("prompt", "")
+        messages = [
+            {"role": "system", "content": spec_text},
+            {"role": "user", "content": prompt},
+        ]
 
-    for dataset_id, dataset_cfg in datasets_cfg.get("datasets", {}).items():
-        output_path = output_base / f"{dataset_id}.jsonl"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        split = dataset_cfg.get("split", "train")
-        dataset = load_dataset(
-            dataset_cfg["hf_dataset"],
-            dataset_cfg["hf_config"],
-            split=split,
+        completion_payload = client.complete(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            return_metadata=True,
         )
 
-        if dataset_cfg.get("shuffle"):
-            dataset = dataset.shuffle(seed=dataset_cfg.get("seed"))
+        if isinstance(completion_payload, dict):
+            full_response = completion_payload.get("text", "")
+            reasoning_segment = completion_payload.get("reasoning_text") or ""
+            answer_text = completion_payload.get("answer_text") or full_response
+        else:
+            full_response = str(completion_payload)
+            reasoning_segment = ""
+            answer_text = full_response
 
-        limit = dataset_cfg.get("limit")
-        if limit is not None:
-            limit = min(int(limit), len(dataset))
-            dataset = dataset.select(range(limit))
+        cleaned_answer = _clean_answer_text(answer_text, reasoning_segment, expects_reasoning=reasoning)
 
-        num_samples = len(dataset)
-
-        progress = None
-        if show_progress and tqdm is not None:
-            progress = tqdm(desc=f"{spec_id}:{dataset_id}", total=num_samples, unit="prompt")
-
-        try:
-            with output_path.open("w", encoding="utf-8") as handle:
-                for index, sample in enumerate(dataset):
-                    prompt = sample["prompt"]
-                    category = sample.get("category")
-                    messages = [
-                        {"role": "system", "content": spec_text},
-                        {"role": "user", "content": prompt},
-                    ]
-                    completion_payload = model.complete(
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        return_metadata=True,
-                    )
-
-                    if isinstance(completion_payload, dict):
-                        full_response = completion_payload.get("text", "")
-                        reasoning_segment = completion_payload.get("reasoning_text") or ""
-                        answer_text = completion_payload.get("answer_text") or full_response
-                        if reasoning_segment and answer_text.startswith(reasoning_segment):
-                            answer_text = answer_text[len(reasoning_segment) :].strip()
-                    else:
-                        full_response = str(completion_payload)
-                        answer_text = full_response
-
-                    answer_text = re.sub(
-                        r"<think>.*?</think>", "", answer_text, flags=re.IGNORECASE | re.DOTALL
-                    ).strip()
-
-                    record = {
-                        "spec_id": spec_id,
-                        "dataset": dataset_id,
-                        "index": index,
-                        "category": category,
-                        "prompt": prompt,
-                        "response": full_response,
-                        "answer_text": answer_text,
-                    }
-                    handle.write(json.dumps(record, ensure_ascii=False))
-                    handle.write("\n")
-                    if progress is not None:
-                        progress.update(1)
-        finally:
-            if progress is not None:
-                progress.close()
-
-        summaries.append(
+        results.append(
             {
-                "dataset": dataset_id,
-                "samples": num_samples,
-                "output_path": str(output_path),
+                "spec_id": spec_id,
+                "dataset": dataset_name,
+                "index": sample.get("index", 0),
+                "category": sample.get("category"),
+                "prompt": prompt,
+                "response": full_response,
+                "answer_text": cleaned_answer,
             }
         )
-        LOGGER.debug(
-            "Refusal dataset %s (spec=%s): wrote %d samples to %s",
-            dataset_id,
-            spec_id,
-            num_samples,
-            output_path,
-        )
 
-    summary_path = output_base / "summary.json"
-    with summary_path.open("w", encoding="utf-8") as handle:
-        json.dump(summaries, handle, ensure_ascii=False, indent=2)
-
-    return {
-        "spec_id": spec_id,
-        "datasets": summaries,
-        "summary_path": str(summary_path),
-    }
+    return results
 
 
-__all__ = ["run_refusal_evaluation"]
+__all__ = ["evaluate_refusal_chunk"]

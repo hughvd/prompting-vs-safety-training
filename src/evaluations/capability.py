@@ -1,22 +1,14 @@
 from __future__ import annotations
 
-import json
-import logging
 import re
-from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
-
-from datasets import load_dataset
+from typing import Any, Dict, Iterable, List
 
 from ..model_client import ChatModelClient
-from ..utils import ensure_output_dirs
 
-try:
-    from tqdm.auto import tqdm
-except ImportError:  # pragma: no cover
-    tqdm = None  # type: ignore
+THINK_PATTERN = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
-LOGGER = logging.getLogger(__name__)
+## SHITTY FIX
+is_reasoning = True
 
 def _format_prompt(question: str, options: Iterable[str]) -> str:
     lines = [question.strip(), "", "Options:"]
@@ -24,13 +16,11 @@ def _format_prompt(question: str, options: Iterable[str]) -> str:
         label = chr(ord("A") + idx)
         lines.append(f"({label}) {option}")
     lines.append("")
-    lines.append(
-        "After reasoning, output a final line formatted exactly as 'Answer: <letter>'."
-    )
+    lines.append("After reasoning, output a final line formatted exactly as 'Answer: <letter>'.")
     return "\n".join(lines)
 
 
-def _extract_answer(text: str, valid_labels: Iterable[str]) -> Optional[str]:
+def _extract_answer(text: str, valid_labels: Iterable[str]) -> str | None:
     if not text:
         return None
 
@@ -52,132 +42,101 @@ def _extract_answer(text: str, valid_labels: Iterable[str]) -> Optional[str]:
     return None
 
 
-def run_capability_evaluation(
+def _clean_answer_text(
+    answer_text: str,
+    reasoning_segment: str | None = None,
     *,
+    expects_reasoning: bool = False,
+) -> str:
+    # Shitty fix for non reasoning models
+    if not is_reasoning:
+        return answer_text.strip()
+    text = answer_text or ""
+    if reasoning_segment and text.startswith(reasoning_segment):
+        text = text[len(reasoning_segment) :]
+    elif expects_reasoning:
+        closing = re.search(r"</think>", text, re.IGNORECASE)
+        if closing:
+            text = text[closing.end() :]
+        elif re.search(r"<think", text, re.IGNORECASE):
+            return ""
+        else:
+            return text.strip()
+    else:
+        return text.strip()
+    text = THINK_PATTERN.sub("", text)
+    text = re.sub(r"</?think>", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def evaluate_capability_chunk(
     spec_id: str,
     spec_text: str,
-    dataset_cfg: Dict[str, Any],
-    model: ChatModelClient,
+    samples: Iterable[Dict[str, Any]],
+    model_cfg: Dict[str, Any],
     generation_cfg: Dict[str, Any],
-    output_base: Path,
-    show_progress: bool = True,
-) -> Dict[str, Any]:
-    """Run the MMLU-Pro capability evaluation for a single spec."""
-
-    ensure_output_dirs(output_base, create_standard_layout=False)
+    *,
+    request_timeout: float,
+    dry_run: bool,
+    reasoning: bool,
+) -> List[Dict[str, Any]]:
+    client = ChatModelClient(model_cfg, request_timeout=request_timeout, dry_run=dry_run)
 
     temperature = generation_cfg.get("temperature")
     max_tokens = generation_cfg.get("max_tokens")
 
-    split = dataset_cfg.get("split", "validation")
-    dataset = load_dataset(
-        dataset_cfg["hf_dataset"],
-        split=split,
-    )
+    results: List[Dict[str, Any]] = []
+    for sample in samples:
+        options = sample.get("options", [])
+        prompt = _format_prompt(sample.get("question", ""), options)
+        messages = [
+            {"role": "system", "content": spec_text},
+            {"role": "user", "content": prompt},
+        ]
 
-    if dataset_cfg.get("shuffle"):
-        dataset = dataset.shuffle(seed=dataset_cfg.get("seed"))
+        completion_payload = client.complete(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            return_metadata=True,
+        )
 
-    limit = dataset_cfg.get("limit")
-    if limit is not None:
-        limit = min(int(limit), len(dataset))
-        dataset = dataset.select(range(limit))
+        if isinstance(completion_payload, dict):
+            full_response = completion_payload.get("text", "")
+            reasoning_segment = completion_payload.get("reasoning_text") or ""
+            answer_text = completion_payload.get("answer_text") or full_response
+        else:
+            full_response = str(completion_payload)
+            reasoning_segment = ""
+            answer_text = full_response
 
-    progress = None
-    if show_progress and tqdm is not None:
-        progress = tqdm(desc=f"{spec_id}:MMLU-Pro", total=len(dataset), unit="question")
+        cleaned_answer = _clean_answer_text(
+            answer_text,
+            reasoning_segment,
+            expects_reasoning=reasoning,
+        )
 
-    output_path = output_base / "mmlu_pro.jsonl"
-    metrics_path = output_base / "metrics.json"
+        valid_labels = [chr(ord("A") + idx) for idx in range(len(options))]
+        predicted = _extract_answer(cleaned_answer, valid_labels)
+        correct_label = str(sample.get("answer", "")).strip().upper()
 
-    total = len(dataset)
-    correct = 0
+        results.append(
+            {
+                "spec_id": spec_id,
+                "index": sample.get("index", 0),
+                "question_id": sample.get("question_id"),
+                "category": sample.get("category"),
+                "question": sample.get("question"),
+                "options": options,
+                "correct_answer": correct_label,
+                "model_answer": predicted,
+                "is_correct": predicted == correct_label,
+                "response": full_response,
+                "answer_text": cleaned_answer,
+            }
+        )
 
-    with output_path.open("w", encoding="utf-8") as handle:
-        try:
-            for index, sample in enumerate(dataset):
-                options = sample["options"]
-                prompt = _format_prompt(sample["question"], options)
-                messages = [
-                    {"role": "system", "content": spec_text},
-                    {"role": "user", "content": prompt},
-                ]
-                completion_payload = model.complete(
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    return_metadata=True,
-                )
-
-                if isinstance(completion_payload, dict):
-                    completion = completion_payload.get("text", "")
-                    reasoning_segment = completion_payload.get("reasoning_text") or ""
-                    answer_source = completion_payload.get("answer_text") or completion
-                    if reasoning_segment and answer_source.startswith(reasoning_segment):
-                        answer_source = answer_source[len(reasoning_segment) :].strip()
-                else:
-                    completion = str(completion_payload)
-                    answer_source = completion
-
-                answer_source = re.sub(r"<think>.*?</think>", "", answer_source, flags=re.IGNORECASE | re.DOTALL)
-
-                valid_labels = [chr(ord("A") + idx) for idx in range(len(options))]
-                predicted = _extract_answer(answer_source, valid_labels)
-                correct_label = str(sample.get("answer", "")).strip().upper()
-                is_correct = predicted == correct_label
-                if is_correct:
-                    correct += 1
-
-                record = {
-                    "spec_id": spec_id,
-                    "question_id": sample.get("question_id"),
-                    "category": sample.get("category"),
-                    "question": sample["question"],
-                    "options": options,
-                    "correct_answer": correct_label,
-                    "model_answer": predicted,
-                    "is_correct": is_correct,
-                    "response": completion,
-                    "answer_text": answer_source,
-                }
-                handle.write(json.dumps(record, ensure_ascii=False))
-                handle.write("\n")
-
-                if progress is not None:
-                    progress.update(1)
-        finally:
-            if progress is not None:
-                progress.close()
-
-    accuracy = correct / total if total else 0.0
-    metrics = {
-        "spec_id": spec_id,
-        "total": total,
-        "correct": correct,
-        "accuracy": accuracy,
-        "split": split,
-        "limit": limit,
-        "output_path": str(output_path),
-    }
-
-    with metrics_path.open("w", encoding="utf-8") as handle:
-        json.dump(metrics, handle, ensure_ascii=False, indent=2)
-
-    LOGGER.debug(
-        "MMLU-Pro (spec=%s): accuracy %.2f%% (%d/%d)",
-        spec_id,
-        accuracy * 100,
-        correct,
-        total,
-    )
-
-    return {
-        "spec_id": spec_id,
-        "metrics_path": str(metrics_path),
-        "accuracy": accuracy,
-        "total": total,
-        "correct": correct,
-    }
+    return results
 
 
-__all__ = ["run_capability_evaluation"]
+__all__ = ["evaluate_capability_chunk"]

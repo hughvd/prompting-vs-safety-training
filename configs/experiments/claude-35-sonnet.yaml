@@ -1,10 +1,10 @@
 output:
   root: "data/experiments"
-  experiment: "deepseekR1"
+  experiment: "claude-3.5-sonnet"
 model:
   provider: "openai"
   base_url: "https://openrouter.ai/api/v1"
-  name: "deepseek/deepseek-r1-0528-qwen3-8b"
+  name: "anthropic/claude-3.5-sonnet"
   api_key_env: "OPENROUTER_API_KEY"
   reasoning: true
 generation:
@@ -43,7 +43,7 @@ evaluations:
     config: "configs/evaluation/capability.yaml"
     output_subdir: "capability"
 parallel:
-  max_workers: 50            # number of concurrent workers inside a run
+  max_workers: 20            # number of concurrent workers inside a run
   max_prompts_per_worker: 50  # shard size for each dataset chunk
 runs:
   count: 3                  # number of experiment replicas

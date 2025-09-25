@@ -1,4 +1,4 @@
-from .capability import run_capability_evaluation
-from .refusal import run_refusal_evaluation
+from .capability import evaluate_capability_chunk
+from .refusal import evaluate_refusal_chunk
 
-__all__ = ["run_capability_evaluation", "run_refusal_evaluation"]
+__all__ = ["evaluate_capability_chunk", "evaluate_refusal_chunk"]
