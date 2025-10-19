@@ -3,9 +3,9 @@ output:
   experiment: "gpt-4o"
 model:
   provider: "openai"
-  base_url: "https://openrouter.ai/api/v1"
-  name: "openai/gpt-4o"
-  api_key_env: "OPENROUTER_API_KEY"
+  base_url: "https://api.openai.com/v1"
+  name: "gpt-4o"
+  api_key_env: "OPENAI_API_KEY"
   reasoning: true
 generation:
   max_tokens: 1024
@@ -43,7 +43,7 @@ evaluations:
     config: "configs/evaluation/capability.yaml"
     output_subdir: "capability"
 parallel:
-  max_workers: 20            # number of concurrent workers inside a run
+  max_workers: 10            # number of concurrent workers inside a run
   max_prompts_per_worker: 50  # shard size for each dataset chunk
 runs:
   count: 3                 # number of experiment replicas

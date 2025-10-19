@@ -64,12 +64,15 @@ def evaluate_refusal_chunk(
             {"role": "user", "content": prompt},
         ]
 
-        completion_payload = client.complete(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            return_metadata=True,
-        )
+        try:
+            completion_payload = client.complete(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                return_metadata=True,
+            )
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(f"Refusal chunk failed for prompt index {sample.get('index')}: {exc}") from exc
 
         if isinstance(completion_payload, dict):
             full_response = completion_payload.get("text", "")
